@@ -1,0 +1,229 @@
+import { authOdoo, callOdoo, DB, PASSWORD } from "../services/odooClient.js";
+
+// Map of website-facing field names to Odoo model field names
+const WEBSITE_TO_ODOO_FIELD = {
+  sku: "x_studio_sku",
+  name: "name",
+  description: "description_purchase",
+  rating: "x_studio_product_rating",
+  price: "list_price",
+  stock_quantity: "x_studio_stock_quantity",
+  image_1920: "image_1920",
+  image_1024: "image_1024",
+  image_512: "image_512",
+  image_256: "image_256",
+  image_128: "image_128",
+  is_custom: "x_studio_is_custom",
+  category: "x_studio_selection_field_75k_1jcm2f0o4",
+  fiber_count: "x_studio_fiber_count",
+  cable_type: "x_studio_cable_type",
+  jacket_color: "x_studio_jacket_color",
+  length_available: "x_studio_length_available",
+};
+const ODOO_TO_WEBSITE_FIELD = Object.fromEntries(
+  Object.entries(WEBSITE_TO_ODOO_FIELD).map(([websiteKey, odooKey]) => [odooKey, websiteKey])
+);
+
+async function toBase64IfUrl(value, fieldLabel = "image") {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  const lower = trimmed.toLowerCase();
+  if (!lower.startsWith("http://") && !lower.startsWith("https://")) return value;
+
+  const res = await fetch(trimmed);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch ${fieldLabel} from URL (${res.status} ${res.statusText})`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  return buffer.toString("base64");
+}
+
+async function fetchProductFieldNames(uid) {
+  const fields = await callOdoo({
+    jsonrpc: "2.0",
+    method: "call",
+    params: {
+      service: "object",
+      method: "execute_kw",
+      args: [DB, uid, PASSWORD, "product.template", "fields_get", []],
+    },
+    id: 11,
+  });
+
+  return fields?.result ? Object.keys(fields.result) : [];
+}
+
+export async function getProductFields(req, res) {
+  try {
+    const uid = await authOdoo();
+    if (!uid) return res.status(401).json({ error: "Auth failed" });
+
+    const fields = await callOdoo({
+      jsonrpc: "2.0",
+      method: "call",
+      params: {
+        service: "object",
+        method: "execute_kw",
+        args: [
+          DB,
+          uid,
+          PASSWORD,
+          "product.template",
+          "fields_get",
+          [],
+          { attributes: ["string", "type", "required"] },
+        ],
+      },
+      id: 2,
+    });
+
+    res.json(fields.result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+export async function createProduct(req, res) {
+  try {
+    const uid = await authOdoo();
+    if (!uid) return res.status(401).json({ error: "Odoo authentication failed" });
+
+    const input = req.body;
+
+    const availableFields = await fetchProductFieldNames(uid);
+    const data = {};
+    for (const [inputKey, odooField] of Object.entries(WEBSITE_TO_ODOO_FIELD)) {
+      const value = input[inputKey];
+      if (value === undefined || value === null) continue;
+      if (!availableFields.includes(odooField)) continue;
+      let normalized = value;
+      if (odooField === "image_128") {
+        normalized = await toBase64IfUrl(value, "image_128");
+      }
+      data[odooField] = normalized;
+    }
+
+    // Default product type and visibility if not provided by caller
+    data.type = data.type || "consu";
+    data.website_published = data.website_published ?? true;
+
+    const created = await callOdoo({
+      jsonrpc: "2.0",
+      method: "call",
+      params: {
+        service: "object",
+        method: "execute_kw",
+        args: [DB, uid, PASSWORD, "product.template", "create", [data]],
+      },
+      id: Date.now(),
+    });
+
+    if (created.error) {
+      return res.status(400).json({ error: created.error });
+    }
+
+    res.json({ success: true, product_id: created.result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+export async function deleteProduct(req, res) {
+  try {
+    const uid = await authOdoo();
+    if (!uid) return res.status(401).json({ error: "Auth failed" });
+
+    const productId = parseInt(req.params.id, 10);
+
+    const result = await callOdoo({
+      jsonrpc: "2.0",
+      method: "call",
+      params: {
+        service: "object",
+        method: "execute_kw",
+        args: [DB, uid, PASSWORD, "product.template", "unlink", [[productId]]],
+      },
+      id: 4,
+    });
+
+    res.json({ deleted: result.result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+export async function getProductTypeValues(req, res) {
+  try {
+    const uid = await authOdoo();
+    if (!uid) return res.status(401).json({ error: "Auth failed" });
+
+    const fields = await callOdoo({
+      jsonrpc: "2.0",
+      method: "call",
+      params: {
+        service: "object",
+        method: "execute_kw",
+        args: [DB, uid, PASSWORD, "product.template", "fields_get", ["type"]],
+      },
+      id: 99,
+    });
+
+    res.json(fields.result.type.selection);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+export async function listProducts(req, res) {
+  try {
+    const uid = await authOdoo();
+    if (!uid) return res.status(401).json({ error: "Odoo authentication failed" });
+
+    const requestedFields = Array.from(new Set(Object.values(WEBSITE_TO_ODOO_FIELD)));
+
+    const availableFields = await fetchProductFieldNames(uid);
+    const fields = requestedFields.filter((field) => availableFields.includes(field));
+    if (fields.length === 0) fields.push("name"); // minimal fallback to avoid empty list
+
+    const response = await callOdoo({
+      jsonrpc: "2.0",
+      method: "call",
+      params: {
+        service: "object",
+        method: "execute_kw",
+        args: [
+          DB,
+          uid,
+          PASSWORD,
+          "product.template",
+          "search_read",
+          [ [] ],
+          { fields, limit: 2000 },
+        ],
+      },
+      id: Date.now(),
+    });
+
+    if (response.error) {
+      return res.status(400).json({ error: response.error });
+    }
+
+    const products = response.result.map((product) => {
+      const mapped = { id: product.id };
+      for (const [odooField, websiteField] of Object.entries(ODOO_TO_WEBSITE_FIELD)) {
+        if (product[odooField] !== undefined) {
+          mapped[websiteField] = product[odooField];
+        }
+      }
+      return mapped;
+    });
+
+    res.json({
+      success: true,
+      count: response.result.length,
+      products,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
