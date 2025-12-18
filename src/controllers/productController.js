@@ -24,6 +24,14 @@ const ODOO_TO_WEBSITE_FIELD = Object.fromEntries(
   Object.entries(WEBSITE_TO_ODOO_FIELD).map(([websiteKey, odooKey]) => [odooKey, websiteKey])
 );
 
+const IMAGE_FIELDS = new Set(["image_1920", "image_1024", "image_512", "image_256", "image_128"]);
+
+function stripDataUrl(value) {
+  if (typeof value !== "string") return value;
+  const match = value.trim().match(/^data:.*;base64,(.*)$/i);
+  return match ? match[1] : value;
+}
+
 async function toBase64IfUrl(value, fieldLabel = "image") {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
@@ -36,6 +44,12 @@ async function toBase64IfUrl(value, fieldLabel = "image") {
   }
   const buffer = Buffer.from(await res.arrayBuffer());
   return buffer.toString("base64");
+}
+
+async function normalizeImageValue(value, fieldLabel) {
+  if (value === undefined || value === null) return value;
+  const stripped = stripDataUrl(value);
+  return await toBase64IfUrl(stripped, fieldLabel);
 }
 
 async function fetchProductFieldNames(uid) {
@@ -92,15 +106,26 @@ export async function createProduct(req, res) {
 
     const availableFields = await fetchProductFieldNames(uid);
     const data = {};
+    const imageInputs = {};
     for (const [inputKey, odooField] of Object.entries(WEBSITE_TO_ODOO_FIELD)) {
       const value = input[inputKey];
       if (value === undefined || value === null) continue;
       if (!availableFields.includes(odooField)) continue;
-      let normalized = value;
-      if (odooField === "image_128") {
-        normalized = await toBase64IfUrl(value, "image_128");
+      if (IMAGE_FIELDS.has(odooField)) {
+        imageInputs[odooField] = value;
+        continue;
       }
-      data[odooField] = normalized;
+      data[odooField] = value;
+    }
+
+    const preferredImage =
+      imageInputs.image_1920 ??
+      imageInputs.image_1024 ??
+      imageInputs.image_512 ??
+      imageInputs.image_256 ??
+      imageInputs.image_128;
+    if (preferredImage !== undefined && availableFields.includes("image_1920")) {
+      data.image_1920 = await normalizeImageValue(preferredImage, "image_1920");
     }
 
     // Default product type and visibility if not provided by caller
