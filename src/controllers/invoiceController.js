@@ -1,5 +1,21 @@
 import { authOdoo, callOdoo, DB, PASSWORD } from "../services/odooClient.js";
 
+const INVOICE_FIELDS = [
+  "name",
+  "move_type",
+  "invoice_date",
+  "invoice_date_due",
+  "invoice_payment_term_id",
+  "partner_id",
+  "invoice_origin",
+  "invoice_user_id",
+  "state",
+  "amount_total",
+  "amount_residual",
+  "currency_id",
+  "invoice_line_ids",
+];
+
 export async function getInvoiceFields(req, res) {
   const uid = await authOdoo();
   if (!uid) return res.status(401).json({ error: "Auth failed" });
@@ -34,22 +50,6 @@ export async function listInvoices(req, res) {
     const moveType = req.query.type || "out_invoice";
     const domain = moveType === "all" ? [] : [["move_type", "=", moveType]];
 
-    const fields = [
-      "name",
-      "move_type",
-      "invoice_date",
-      "invoice_date_due",
-      "invoice_payment_term_id",
-      "partner_id",
-      "invoice_origin",
-      "invoice_user_id",
-      "state",
-      "amount_total",
-      "amount_residual",
-      "currency_id",
-      "invoice_line_ids",
-    ];
-
     const response = await callOdoo({
       jsonrpc: "2.0",
       method: "call",
@@ -63,7 +63,7 @@ export async function listInvoices(req, res) {
           "account.move",
           "search_read",
           [domain],
-          { fields, limit: 500 },
+          { fields: INVOICE_FIELDS, limit: 500 },
         ],
       },
       id: Date.now(),
@@ -78,6 +78,55 @@ export async function listInvoices(req, res) {
       count: response.result.length,
       invoices: response.result,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+export async function getInvoiceById(req, res) {
+  try {
+    const uid = await authOdoo();
+    if (!uid) return res.status(401).json({ error: "Auth failed" });
+
+    const rawId = String(req.params.id || "").trim();
+    if (!rawId) {
+      return res.status(400).json({ error: "Missing invoice identifier" });
+    }
+
+    const isNumericId = /^\d+$/.test(rawId);
+    const domain = isNumericId
+      ? [["id", "=", Number(rawId)]]
+      : ["|", ["name", "=", rawId], ["invoice_origin", "=", rawId]];
+
+    const response = await callOdoo({
+      jsonrpc: "2.0",
+      method: "call",
+      params: {
+        service: "object",
+        method: "execute_kw",
+        args: [
+          DB,
+          uid,
+          PASSWORD,
+          "account.move",
+          "search_read",
+          [domain],
+          { fields: INVOICE_FIELDS, limit: 1 },
+        ],
+      },
+      id: Date.now(),
+    });
+
+    if (response.error) {
+      return res.status(400).json({ error: response.error });
+    }
+
+    const invoice = response.result?.[0];
+    if (!invoice) {
+      return res.status(404).json({ error: "Invoice not found" });
+    }
+
+    res.json({ success: true, invoice });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

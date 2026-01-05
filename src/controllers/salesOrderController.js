@@ -1,5 +1,22 @@
 import { authOdoo, callOdoo, DB, PASSWORD } from "../services/odooClient.js";
 
+const SALES_ORDER_FIELDS = [
+  "name",
+  "state",
+  "partner_id",
+  "partner_invoice_id",
+  "partner_shipping_id",
+  "date_order",
+  "validity_date",
+  "commitment_date",
+  "user_id",
+  "amount_total",
+  "amount_tax",
+  "amount_untaxed",
+  "currency_id",
+  "order_line",
+];
+
 export async function getSalesOrderFields(req, res) {
   const uid = await authOdoo();
   if (!uid) return res.status(401).json({ error: "Auth failed" });
@@ -34,23 +51,6 @@ export async function listSalesOrders(req, res) {
     const state = req.query.state;
     const domain = state ? [["state", "=", state]] : [];
 
-    const fields = [
-      "name",
-      "state",
-      "partner_id",
-      "partner_invoice_id",
-      "partner_shipping_id",
-      "date_order",
-      "validity_date",
-      "commitment_date",
-      "user_id",
-      "amount_total",
-      "amount_tax",
-      "amount_untaxed",
-      "currency_id",
-      "order_line",
-    ];
-
     const response = await callOdoo({
       jsonrpc: "2.0",
       method: "call",
@@ -64,7 +64,7 @@ export async function listSalesOrders(req, res) {
           "sale.order",
           "search_read",
           [domain],
-          { fields, limit: 500 },
+          { fields: SALES_ORDER_FIELDS, limit: 500 },
         ],
       },
       id: Date.now(),
@@ -79,6 +79,53 @@ export async function listSalesOrders(req, res) {
       count: response.result.length,
       sales_orders: response.result,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+export async function getSalesOrderById(req, res) {
+  try {
+    const uid = await authOdoo();
+    if (!uid) return res.status(401).json({ error: "Auth failed" });
+
+    const rawId = String(req.params.id || "").trim();
+    if (!rawId) {
+      return res.status(400).json({ error: "Missing sales order identifier" });
+    }
+
+    const isNumericId = /^\d+$/.test(rawId);
+    const domain = isNumericId ? [["id", "=", Number(rawId)]] : [["name", "=", rawId]];
+
+    const response = await callOdoo({
+      jsonrpc: "2.0",
+      method: "call",
+      params: {
+        service: "object",
+        method: "execute_kw",
+        args: [
+          DB,
+          uid,
+          PASSWORD,
+          "sale.order",
+          "search_read",
+          [domain],
+          { fields: SALES_ORDER_FIELDS, limit: 1 },
+        ],
+      },
+      id: Date.now(),
+    });
+
+    if (response.error) {
+      return res.status(400).json({ error: response.error });
+    }
+
+    const salesOrder = response.result?.[0];
+    if (!salesOrder) {
+      return res.status(404).json({ error: "Sales order not found" });
+    }
+
+    res.json({ success: true, sales_order: salesOrder });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
