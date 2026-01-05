@@ -1,3 +1,4 @@
+import { ODOO_URL } from "../config/odoo.js";
 import { authOdoo, callOdoo, DB, PASSWORD } from "../services/odooClient.js";
 
 // Map of website-facing field names to Odoo model field names
@@ -22,11 +23,17 @@ const WEBSITE_TO_ODOO_FIELD = {
 };
 const IMAGE_FIELDS = new Set(["image_1920", "image_1024", "image_512", "image_256", "image_128"]);
 
-function shortenToSingleLine(value, maxLen = 120) {
-  if (typeof value !== "string") return value;
-  const singleLine = value.replace(/\s+/g, " ").trim();
-  if (singleLine.length <= maxLen) return singleLine;
-  return `${singleLine.slice(0, Math.max(0, maxLen - 3))}...`;
+function getOdooBaseUrl() {
+  return ODOO_URL.replace(/\/jsonrpc\/?$/i, "");
+}
+
+function buildImageUrl(baseUrl, productId) {
+  const normalizedBaseUrl = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  const url = new URL("web/image", normalizedBaseUrl);
+  url.searchParams.set("model", "product.template");
+  url.searchParams.set("id", String(productId));
+  url.searchParams.set("field", "image_1920");
+  return url.toString();
 }
 
 function stripDataUrl(value) {
@@ -255,7 +262,9 @@ export async function listProducts(req, res) {
     if (!uid) return res.status(401).json({ error: "Odoo authentication failed" });
 
     const availableFields = await fetchProductFieldNames(uid);
-    const fields = availableFields.length > 0 ? availableFields : ["name"];
+    const fields = availableFields.length > 0 ? availableFields : ["id", "name"];
+    const filteredFields = fields.filter((field) => !field.startsWith("image_"));
+    if (!filteredFields.includes("id")) filteredFields.unshift("id");
 
     const response = await callOdoo({
       jsonrpc: "2.0",
@@ -270,7 +279,7 @@ export async function listProducts(req, res) {
           "product.template",
           "search_read",
           [ [] ],
-          { fields, limit: 2000 },
+          { fields: filteredFields, limit: 2000 },
         ],
       },
       id: Date.now(),
@@ -280,20 +289,72 @@ export async function listProducts(req, res) {
       return res.status(400).json({ error: response.error });
     }
 
-    const products = response.result.map((product) => {
-      const normalized = { ...product };
-      for (const [key, value] of Object.entries(normalized)) {
-        if (key.startsWith("image_")) {
-          normalized[key] = shortenToSingleLine(value);
-        }
-      }
-      return normalized;
-    });
+    const baseUrl = getOdooBaseUrl();
+    const products = response.result.map((product) => ({
+      ...product,
+      image_1920: buildImageUrl(baseUrl, product.id),
+    }));
 
     res.json({
       success: true,
       count: response.result.length,
       products,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+export async function getProductById(req, res) {
+  try {
+    const uid = await authOdoo();
+    if (!uid) return res.status(401).json({ error: "Odoo authentication failed" });
+
+    const productId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(productId)) {
+      return res.status(400).json({ error: "Invalid product id" });
+    }
+
+    const availableFields = await fetchProductFieldNames(uid);
+    const fields = availableFields.length > 0 ? availableFields : ["id", "name"];
+    const filteredFields = fields.filter((field) => !field.startsWith("image_"));
+    if (!filteredFields.includes("id")) filteredFields.unshift("id");
+
+    const response = await callOdoo({
+      jsonrpc: "2.0",
+      method: "call",
+      params: {
+        service: "object",
+        method: "execute_kw",
+        args: [
+          DB,
+          uid,
+          PASSWORD,
+          "product.template",
+          "search_read",
+          [[["id", "=", productId]]],
+          { fields: filteredFields, limit: 1 },
+        ],
+      },
+      id: Date.now(),
+    });
+
+    if (response.error) {
+      return res.status(400).json({ error: response.error });
+    }
+
+    const product = response.result?.[0];
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    const baseUrl = getOdooBaseUrl();
+    res.json({
+      success: true,
+      product: {
+        ...product,
+        image_1920: buildImageUrl(baseUrl, productId),
+      },
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
